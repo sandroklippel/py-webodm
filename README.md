@@ -1,12 +1,12 @@
-# Project name
+# Py-WebODM
 
-You may use this template to create Python packages quickly.
+Python library for interacting with the WebODM API.
 
 ## Setup
 
 ### Minimal installation
 
-- [ ] Clone this repo `https://github.com/richard-hajek/python-setuptools-package-template.git`
+- [ ] Clone this repo 
 - [ ] Run `make prepare`
 
 ### Full installation
