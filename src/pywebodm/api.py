@@ -1,9 +1,14 @@
 """
 pywebodm
+
+Python library for interacting with the WebODM API.
+
+api.py - Main API classes and functions
+
 """
 
 from typing import Iterator
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from urllib.parse import urlparse
 from pywebodm.utils import odmpreset_to_dict, fmt_endpoint
@@ -14,6 +19,7 @@ import requests
 class TaskStatus(Enum):
     """Task status
 
+    UNKNOWN: Some unforeseen situation
     QUEUED: Task's files have been uploaded and are waiting to be processed.
     RUNNING: Task is currently being processed.
     FAILED:	Task has failed for some reason (not enough images, out of memory, etc).
@@ -21,6 +27,7 @@ class TaskStatus(Enum):
     CANCELED: Task was manually canceled by the user.
     """
 
+    UNKNOWN = 0
     QUEUED = 10
     RUNNING = 20
     FAILED = 30
@@ -63,18 +70,18 @@ class Task:
         return self._data.get("name", "")
 
     @property
-    def processing_time(self) -> timedelta | None:
+    def processing_time(self) -> timedelta:
         try:
-            return timedelta(milliseconds=self._data.get("processing_time"))
+            return timedelta(milliseconds=self._data.get("processing_time", 0))
         except (ValueError, TypeError):
-            return None
+            return timedelta(milliseconds=0)
 
     @property
-    def status(self) -> TaskStatus | None:
+    def status(self) -> TaskStatus:
         try:
-            return TaskStatus(self._data.get("status"))
+            return TaskStatus(self._data.get("status", 0))
         except (ValueError, TypeError):
-            return None
+            return TaskStatus(0)
 
     @property
     def last_error(self) -> str:
@@ -97,6 +104,22 @@ class Task:
         return self._data.get("statistics", {})
 
     @property
+    def area(self) -> float | None:
+        """if available, returns the area in m2"""
+        return self.statistics.get("area")
+
+    @property
+    def gsd(self) -> float | None:
+        """if available, returns the gsd in cm"""
+        return self.statistics.get("gsd")
+
+    @property
+    def points(self) -> int | None:
+        """if available, returns the number of reconstructed points"""
+        pc = self.statistics.get("pointcloud", {})
+        return pc.get("points")
+
+    @property
     def available_assets(self) -> list:
         return self._data.get("available_assets", [])
 
@@ -108,11 +131,22 @@ class Task:
     def date(self) -> datetime | None:
 
         try:
-            return datetime.strptime(
-                self._data.get("created_at"), "%Y-%m-%dT%H:%M:%S.%fZ"
-            )
+            return (
+                datetime.strptime(
+                    self._data.get("created_at"), "%Y-%m-%dT%H:%M:%S.%fZ"  # ISO 8601
+                )
+            ).replace(tzinfo=timezone.utc)
         except (ValueError, TypeError):
             return None
+
+    @property
+    def age(self) -> timedelta:
+        if not self.finished:
+            return timedelta(milliseconds=0)
+        try:
+            return datetime.now(timezone.utc) - (self.date + self.processing_time)
+        except (ValueError, TypeError):
+            return timedelta(milliseconds=0)
 
     @property
     def upload_progress(self) -> float:
@@ -129,6 +163,14 @@ class Task:
     @property
     def partial(self) -> bool:
         return self._data.get("partial", False)
+
+    @property
+    def finished(self) -> bool:
+        return self.status in [
+            TaskStatus.CANCELED,
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+        ]
 
 
 class Project:
@@ -153,33 +195,47 @@ class Project:
     def date(self) -> datetime | None:
 
         try:
-            return datetime.strptime(
-                self._data.get("created_at"), "%Y-%m-%dT%H:%M:%S.%fZ"
-            )
+            return (
+                datetime.strptime(self._data.get("created_at"), "%Y-%m-%dT%H:%M:%S.%fZ")
+            ).replace(tzinfo=timezone.utc)
         except (ValueError, TypeError):
             return None
 
-    def tasks(self) -> Iterator[int]:
-        for task in self._data["tasks"]:
-            yield task
+    @property
+    def task_list(self) -> list:
+        return self._data["tasks"]
 
+    @property
+    def task_count(self) -> int:
+        return len(self._data["tasks"])
+
+    @property
     def can_add(self) -> bool:
         return "add" in self._data["permissions"]
 
+    @property
     def can_delete(self) -> bool:
         return "delete" in self._data["permissions"]
 
+    @property
     def can_change(self) -> bool:
         return "change" in self._data["permissions"]
 
+    @property
     def can_view(self) -> bool:
         return "view" in self._data["permissions"]
+
+    def tasks(self) -> Iterator[str]:
+        for task in self._data["tasks"]:
+            yield task
 
 
 class WebODM:
     """Main class for communication with the WebODM API"""
 
-    def __init__(self, url, username, password, token_expiration=21600):
+    def __init__(
+        self, url: str, username: str, password: str, token_expiration: int = 21600
+    ) -> None:
 
         url_parsed = urlparse(url)
         if url_parsed.scheme not in ("http", "https"):
@@ -194,7 +250,7 @@ class WebODM:
         self._password = password
         self._token = ""
         self._token_expiration = token_expiration
-        self._token_datetime = datetime.now()
+        self._token_datetime = datetime.now(timezone.utc)
         self._session = requests.Session()
 
     def __enter__(self):
@@ -215,10 +271,10 @@ class WebODM:
         )
         if res.status_code == 200:
             self._token = res.json()["token"]
-            self._token_datetime = datetime.now()
+            self._token_datetime = datetime.now(timezone.utc)
         return self._token
 
-    def create_project(self, name, description):
+    def create_project(self, name: str, description: str) -> Project:
         path = "/api/projects/"
         endpoint = fmt_endpoint(self._scheme, self._netloc, path)
         res = self._session.post(
@@ -229,7 +285,7 @@ class WebODM:
         if res.status_code == 201:
             return Project(res.json())
 
-    def list_projects(self, **filters):
+    def list_projects(self, **filters) -> list:
         # filters: search=&id=&name=&description=&created_at
         path = "/api/projects/"
         endpoint = fmt_endpoint(self._scheme, self._netloc, path)
@@ -237,36 +293,36 @@ class WebODM:
         if res.status_code == 200:
             return [Project(p) for p in res.json()]
 
-    def read_project(self, project_id):
+    def read_project(self, project_id: int) -> Project:
         path = f"/api/projects/{project_id}"
         endpoint = fmt_endpoint(self._scheme, self._netloc, path)
         res = self._session.get(endpoint, headers=self.headers)
         if res.status_code == 200:
             return Project(res.json())
 
-    def delete_project(self, project_id):
+    def delete_project(self, project_id: int) -> bool:
         path = f"/api/projects/{project_id}"
         endpoint = fmt_endpoint(self._scheme, self._netloc, path)
         res = self._session.delete(endpoint, headers=self.headers)
         if res.status_code == 204:
             return True
         return False
-    
-    def list_project_tasks(self, project_id):
+
+    def list_project_tasks(self, project_id: int) -> list:
         path = f"/api/projects/{project_id}/tasks/"
         endpoint = fmt_endpoint(self._scheme, self._netloc, path)
         res = self._session.get(endpoint, headers=self.headers)
         if res.status_code == 200:
             return [Task(p) for p in res.json()]
 
-    def read_task(self, project_id, task_id):
+    def read_task(self, project_id: int, task_id: str) -> Task:
         path = f"/api/projects/{project_id}/tasks/{task_id}/"
         endpoint = fmt_endpoint(self._scheme, self._netloc, path)
         res = self._session.get(endpoint, headers=self.headers)
         if res.status_code == 200:
             return Task(res.json())
-    
-    def delete_task(self, project_id, task_id):
+
+    def delete_task(self, project_id: int, task_id: str) -> bool:
         path = f"/api/projects/{project_id}/tasks/{task_id}/remove/"
         endpoint = fmt_endpoint(self._scheme, self._netloc, path)
         res = self._session.post(endpoint, headers=self.headers)
@@ -281,7 +337,7 @@ class WebODM:
     @property
     def token(self) -> str:
         if (
-            datetime.now() - self._token_datetime
+            datetime.now(timezone.utc) - self._token_datetime
         ).total_seconds() < self._token_expiration and self._token:
             return self._token
         return self.token_refresh()

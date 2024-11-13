@@ -1,3 +1,12 @@
+"""
+pywebodm
+
+Python library for interacting with the WebODM API.
+
+utils.py - some utility functions
+
+"""
+
 import json
 from urllib.parse import urlunparse
 

@@ -6,3 +6,5 @@ venv
 dist/*
 !dist/.gitkeep
 proto.ipynb
+*.pkl
+.vscode
